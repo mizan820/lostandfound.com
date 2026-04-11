@@ -1,0 +1,134 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: categories/{category}/reports
+    // Fields:
+    //   - type: string ('lost' | 'found')
+    //   - title: string (1-100 chars)
+    //   - description: string (1-1000 chars)
+    //   - location: string (1-200 chars)
+    //   - date: timestamp
+    //   - category: string
+    //   - contactInfo: string (1-200 chars)
+    //   - posterId: string (UID)
+    //   - posterEmail: string
+    //   - status: string ('active' | 'resolved')
+    //   - createdAt: timestamp
+    //   - mobile: string
+    //
+    // Collection: users
+    // Fields:
+    //   - uid: string
+    //   - email: string
+    //   - role: string ('user' | 'admin')
+    //   - displayName: string
+    //   - mobile: string (optional)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.posterId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (request.auth.token.email == "moinamoti820@gmail.com" ||
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'));
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidItem(data) {
+      return data.type in ['lost', 'found'] &&
+             data.displayId is string && data.displayId.matches("^[0-9]{6}$") &&
+             data.title is string && data.title.size() > 0 && data.title.size() <= 100 &&
+             data.description is string && data.description.size() > 0 && data.description.size() <= 1000 &&
+             data.location is string && data.location.size() > 0 && data.location.size() <= 200 &&
+             data.status in ['active', 'resolved'] &&
+             (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 1000)) &&
+             (!('road' in data) || (data.road is string && data.road.size() <= 200)) &&
+             (!('houseNo' in data) || (data.houseNo is string && data.houseNo.size() <= 50)) &&
+             (!('village' in data) || (data.village is string && data.village.size() <= 100)) &&
+             (!('postOffice' in data) || (data.postOffice is string && data.postOffice.size() <= 100)) &&
+             (!('country' in data) || (data.country is string && data.country.size() <= 100)) &&
+             (!('mobile' in data) || (data.mobile is string && data.mobile.size() <= 20)) &&
+             (!('category' in data) || (data.category is string && data.category.size() <= 50));
+    }
+
+    function isValidUser(data) {
+      return hasOnlyAllowedFields(['uid', 'email', 'role', 'displayName', 'mobile']) &&
+             data.uid == request.auth.uid &&
+             data.email is string && isValidEmail(data.email) &&
+             data.role in ['user', 'admin'] &&
+             (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 100)) &&
+             (!('mobile' in data) || (data.mobile is string && data.mobile.size() <= 20));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /{path=**}/reports/{reportId} {
+      // Everyone can read items (Visitors, Posters, Admins)
+      allow read: if true;
+      
+      // Only authenticated users can create items
+      allow create: if isAuthenticated() && 
+                    request.resource.data.posterId == request.auth.uid &&
+                    isValidItem(request.resource.data);
+      
+      // Only the poster or an admin can update/delete
+      allow update: if isAuthenticated() && 
+                    (isDocOwner() || isAdmin()) && 
+                    (isAdmin() || request.resource.data.posterId == resource.data.posterId) &&
+                    isValidItem(request.resource.data);
+      
+      allow delete: if isAuthenticated() && (isDocOwner() || isAdmin());
+    }
+
+    // Keep items for backward compatibility during migration
+    match /users/{userId} {
+      // Users can read their own profile, admins can read all
+      allow get, list: if isOwner(userId) || isAdmin();
+      
+      // Users can create their own profile (default to 'user' role unless they are the bootstrap admin)
+      allow create: if isOwner(userId) && 
+                    (request.resource.data.role == 'user' || isAdmin()) &&
+                    isValidUser(request.resource.data);
+      
+      // Only admins can change roles
+      allow update: if (isOwner(userId) && request.resource.data.role == resource.data.role && isValidUser(request.resource.data)) ||
+                    isAdmin();
+      
+      allow delete: if isAdmin();
+    }
+  }
+}
